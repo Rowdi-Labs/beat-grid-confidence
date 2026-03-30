@@ -1,8 +1,8 @@
-"""Pre-extract hidden states from frozen beat_this backbone.
+"""Pre-extract hidden states AND beat/downbeat logits from frozen beat_this backbone.
 
-Since the backbone is frozen, hidden states are deterministic per spectrogram.
-Extracting them once eliminates the need to run the 20M-param backbone during
-training, reducing memory from ~16GB (attention O(T^2)) to ~50MB.
+Saves per-track:
+  {stem}.hidden.npy  — [T, 512] float16 hidden states (for head training)
+  {stem}.logits.npz  — beat_logits [T], downbeat_logits [T] float32 (for eval + correctness targets)
 
 Usage:
     python scripts/extract_hidden_states.py \
@@ -35,31 +35,14 @@ def extract_for_dataset(
     dataset: str,
     device: str,
     chunk_frames: int = 512,
+    force: bool = False,
 ) -> int:
-    """Extract hidden states for all spectrograms in a dataset.
-
-    Processes spectrograms in chunks to avoid OOM on the attention computation.
-    Chunks are stitched with overlap to avoid edge artifacts.
-
-    Args:
-        backbone: Loaded beat_this model
-        spectrogram_dir: Root spectrogram dir (contains dataset subdirs)
-        output_dir: Where to save hidden states
-        dataset: Dataset name (e.g. "ballroom")
-        device: torch device
-        chunk_frames: Process this many frames at a time (controls memory)
-
-    Returns:
-        Number of tracks processed
-    """
     spec_dir = spectrogram_dir / dataset
     out_dir = output_dir / dataset
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Find all spectrograms
     npy_files = sorted(spec_dir.glob("*.npy"))
-
-    overlap = 64  # frames of overlap for stitching
+    overlap = 64
 
     count = 0
     with Progress() as progress:
@@ -67,50 +50,70 @@ def extract_for_dataset(
 
         for npy_path in npy_files:
             stem = npy_path.stem
-            out_path = out_dir / f"{stem}.npy"
+            hidden_path = out_dir / f"{stem}.hidden.npy"
+            logits_path = out_dir / f"{stem}.logits.npz"
 
-            if out_path.exists():
+            if hidden_path.exists() and logits_path.exists() and not force:
                 progress.advance(task)
                 count += 1
                 continue
 
-            # Load spectrogram [T, 128]
             spec = np.load(npy_path, mmap_mode="r")
             spec_tensor = torch.from_numpy(np.array(spec)).float()
             n_frames = spec_tensor.shape[0]
 
-            # Process in chunks to avoid OOM
             hidden_chunks = []
+            beat_chunks = []
+            downbeat_chunks = []
+
             start = 0
             while start < n_frames:
                 end = min(start + chunk_frames, n_frames)
-                chunk = spec_tensor[start:end].unsqueeze(0).to(device)  # [1, T_chunk, 128]
+                chunk = spec_tensor[start:end].unsqueeze(0).to(device)
 
                 with torch.no_grad():
                     h = backbone.frontend(chunk)
-                    h = backbone.transformer_blocks(h)  # [1, T_chunk, 512]
+                    h = backbone.transformer_blocks(h)
+                    logits = backbone.task_heads(h)
 
                 h_np = h.squeeze(0).cpu().numpy()
+                b_np = logits["beat"].squeeze(0).cpu().numpy()
+                d_np = logits["downbeat"].squeeze(0).cpu().numpy()
 
                 if hidden_chunks and overlap > 0 and start > 0:
-                    # Blend overlapping region
                     blend_len = min(overlap, h_np.shape[0], hidden_chunks[-1].shape[0])
                     if blend_len > 0:
-                        weights = np.linspace(0, 1, blend_len).reshape(-1, 1)
+                        w1d = np.linspace(0, 1, blend_len)
+                        w2d = w1d.reshape(-1, 1)
+                        # Blend hidden states
                         hidden_chunks[-1][-blend_len:] = (
-                            (1 - weights) * hidden_chunks[-1][-blend_len:]
-                            + weights * h_np[:blend_len]
+                            (1 - w2d) * hidden_chunks[-1][-blend_len:] + w2d * h_np[:blend_len]
+                        )
+                        # Blend logits
+                        beat_chunks[-1][-blend_len:] = (
+                            (1 - w1d) * beat_chunks[-1][-blend_len:] + w1d * b_np[:blend_len]
+                        )
+                        downbeat_chunks[-1][-blend_len:] = (
+                            (1 - w1d) * downbeat_chunks[-1][-blend_len:] + w1d * d_np[:blend_len]
                         )
                         h_np = h_np[blend_len:]
+                        b_np = b_np[blend_len:]
+                        d_np = d_np[blend_len:]
 
                 hidden_chunks.append(h_np)
+                beat_chunks.append(b_np)
+                downbeat_chunks.append(d_np)
 
-                # Next chunk starts with overlap
                 start = end - overlap if end < n_frames else end
 
-            # Concatenate and save
             hidden = np.concatenate(hidden_chunks, axis=0)
-            np.save(out_path, hidden.astype(np.float16))  # float16 to save disk
+            beat_logits = np.concatenate(beat_chunks)
+            downbeat_logits = np.concatenate(downbeat_chunks)
+
+            np.save(hidden_path, hidden.astype(np.float16))
+            np.savez_compressed(logits_path,
+                                beat_logits=beat_logits.astype(np.float32),
+                                downbeat_logits=downbeat_logits.astype(np.float32))
 
             progress.advance(task)
             count += 1
@@ -119,14 +122,14 @@ def extract_for_dataset(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Pre-extract hidden states from beat_this backbone")
+    parser = argparse.ArgumentParser(description="Pre-extract hidden states + logits from beat_this")
     parser.add_argument("--spectrogram-dir", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--datasets", type=str, nargs="+", required=True)
     parser.add_argument("--device", type=str, default="cpu")
     parser.add_argument("--checkpoint", type=str, default="final0")
-    parser.add_argument("--chunk-frames", type=int, default=512,
-                        help="Frames per chunk (lower = less memory, default 512 ~= 10 sec)")
+    parser.add_argument("--chunk-frames", type=int, default=512)
+    parser.add_argument("--force", action="store_true", help="Re-extract even if files exist")
     args = parser.parse_args()
 
     console.print(f"[bold]Loading backbone: {args.checkpoint}[/bold]")
@@ -141,12 +144,12 @@ def main() -> None:
         console.print(f"\n[bold]Extracting: {dataset}[/bold]")
         n = extract_for_dataset(
             backbone, args.spectrogram_dir, args.output_dir,
-            dataset, args.device, args.chunk_frames,
+            dataset, args.device, args.chunk_frames, args.force,
         )
         total += n
         console.print(f"  Done: {n} tracks")
 
-    console.print(f"\n[bold green]Total: {total} tracks extracted to {args.output_dir}[/bold green]")
+    console.print(f"\n[bold green]Total: {total} tracks to {args.output_dir}[/bold green]")
 
 
 if __name__ == "__main__":

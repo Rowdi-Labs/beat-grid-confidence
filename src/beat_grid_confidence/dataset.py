@@ -346,16 +346,21 @@ class BeatGridConfidenceDataset(Dataset):
 
 
 class HiddenStatesDataset(Dataset):
-    """Dataset that loads pre-extracted hidden states instead of spectrograms.
+    """Dataset that loads pre-extracted hidden states + logits.
 
-    Since the backbone is frozen, hidden states are deterministic. Pre-extracting
-    them (via scripts/extract_hidden_states.py) eliminates the 20M-param backbone
-    from the training loop, reducing memory from ~16GB to ~100MB per batch.
+    Uses backbone logits to compute the CORRECT confidence target:
+    "regional backbone accuracy" — how well does the backbone predict beats
+    in a local window around each frame?
+
+    This is fundamentally different from "is there a beat near this frame"
+    (which just learns the base rate). The correct signal is:
+    - Find frames where backbone predicts beats (logit > 0)
+    - Check which predicted beats match ground truth (within 50ms)
+    - Smooth into a regional accuracy score
 
     Memory budget per batch (batch=32, T=1500, D=512):
         hidden states: 32 * 1500 * 512 * 4B = 94 MB
-        beat targets:  32 * 1500 * 4B       = 0.18 MB
-        head params:   513 * 4B             = 0.002 MB
+        logits:        32 * 1500 * 2 * 4B   = 0.37 MB
         Total: ~95 MB
     """
 
@@ -374,43 +379,54 @@ class HiddenStatesDataset(Dataset):
 
     def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
         ann = self.annotations[idx]
+        ds_dir = self.hidden_states_dir / ann.dataset
 
-        # Load pre-extracted hidden states [T, 512] (stored as float16)
-        npy_path = self.hidden_states_dir / ann.dataset / f"{ann.stem}.npy"
-        if not npy_path.exists():
-            raise FileNotFoundError(
-                f"No hidden states for {ann.stem}. "
-                f"Run: python scripts/extract_hidden_states.py --datasets {ann.dataset}"
-            )
-        hidden = torch.from_numpy(np.load(npy_path).astype(np.float32))
+        # Load pre-extracted hidden states [T, 512]
+        hidden_path = ds_dir / f"{ann.stem}.hidden.npy"
+        if not hidden_path.exists():
+            # Fall back to old format
+            old_path = ds_dir / f"{ann.stem}.npy"
+            if old_path.exists():
+                hidden_path = old_path
+            else:
+                raise FileNotFoundError(
+                    f"No hidden states for {ann.stem}. "
+                    f"Run: python scripts/extract_hidden_states.py --force --datasets {ann.dataset}"
+                )
+        hidden = torch.from_numpy(np.load(hidden_path).astype(np.float32))
         n_frames = hidden.shape[0]
 
-        # Create frame-level beat/downbeat targets
-        beat_target = self._times_to_target(ann.beat_times, n_frames)
-        downbeat_target = self._times_to_target(ann.downbeat_times, n_frames)
+        # Load pre-extracted logits [T] each
+        logits_path = ds_dir / f"{ann.stem}.logits.npz"
+        if logits_path.exists():
+            with np.load(logits_path) as lf:
+                beat_logits = torch.from_numpy(lf["beat_logits"][:n_frames])
+        else:
+            beat_logits = None
 
-        # Generate correctness mask (vectorized)
-        correctness = self._compute_correctness_mask(beat_target, n_frames)
+        # Create frame-level beat target from ground truth
+        beat_target = self._times_to_target(ann.beat_times, n_frames)
+
+        # Compute the CORRECT confidence target: regional backbone accuracy
+        if beat_logits is not None:
+            correctness = self._compute_regional_accuracy(beat_logits, beat_target, n_frames)
+        else:
+            # Fallback if no logits available
+            correctness = torch.ones(n_frames) * 0.5
 
         # Chunk to fixed length
         if self.chunk_frames > 0 and n_frames > self.chunk_frames:
             start = torch.randint(0, n_frames - self.chunk_frames, (1,)).item()
             end = start + self.chunk_frames
             hidden = hidden[start:end]
-            beat_target = beat_target[start:end]
-            downbeat_target = downbeat_target[start:end]
             correctness = correctness[start:end]
         elif self.chunk_frames > 0 and n_frames < self.chunk_frames:
             pad = self.chunk_frames - n_frames
             hidden = torch.nn.functional.pad(hidden, (0, 0, 0, pad))
-            beat_target = torch.nn.functional.pad(beat_target, (0, pad))
-            downbeat_target = torch.nn.functional.pad(downbeat_target, (0, pad))
-            correctness = torch.nn.functional.pad(correctness, (0, pad))
+            correctness = torch.nn.functional.pad(correctness, (0, pad), value=0.5)
 
         return {
             "hidden_states": hidden,
-            "beat_target": beat_target,
-            "downbeat_target": downbeat_target,
             "correctness": correctness,
         }
 
@@ -424,23 +440,60 @@ class HiddenStatesDataset(Dataset):
         return target
 
     @staticmethod
-    def _compute_correctness_mask(
+    def _compute_regional_accuracy(
+        beat_logits: torch.Tensor,
         beat_target: torch.Tensor,
         n_frames: int,
-        tolerance_frames: int = 3,  # 50ms at 50fps = 2.5 frames, round to 3
+        tolerance_frames: int = 3,
+        window_frames: int = 50,  # ~1 second window at 50fps
     ) -> torch.Tensor:
-        """Vectorized correctness mask: 1 if a GT beat is within tolerance.
+        """Compute regional backbone accuracy as the confidence target.
 
-        Uses broadcasting instead of nested Python loops.
-        O(T * G) memory where G = number of GT beats (~60 per 30s track).
+        For each frame, looks at a local window and computes:
+        - Which frames does the backbone predict beats? (logit > 0, local peaks)
+        - Of those predicted beats, what fraction match ground truth?
+
+        Returns a smooth [0, 1] target per frame. High = backbone is right here.
+
+        This is the RIGHT target because it answers "is the backbone reliable
+        in this region?" rather than "is there a beat near this frame?"
         """
-        gt_frames = torch.where(beat_target > 0.5)[0]  # [G]
-        if len(gt_frames) == 0:
-            return torch.zeros(n_frames)
+        # Step 1: Find backbone's predicted beat positions (peaks in logits)
+        sigmoid = torch.sigmoid(beat_logits)
+        pred_peaks = torch.zeros(n_frames, dtype=torch.bool)
+        for i in range(1, n_frames - 1):
+            if sigmoid[i] > 0.3 and sigmoid[i] > sigmoid[i - 1] and sigmoid[i] > sigmoid[i + 1]:
+                pred_peaks[i] = True
+        pred_frames = torch.where(pred_peaks)[0].float()
 
-        # [T] - [G] -> [T, G] distance matrix, then min over G
-        all_frames = torch.arange(n_frames, dtype=torch.float32)  # [T]
-        distances = torch.abs(all_frames.unsqueeze(1) - gt_frames.unsqueeze(0).float())  # [T, G]
-        min_distances = distances.min(dim=1).values  # [T]
+        # Step 2: Find ground truth beat positions
+        gt_frames = torch.where(beat_target > 0.5)[0].float()
 
-        return (min_distances <= tolerance_frames).float()
+        if len(pred_frames) == 0 or len(gt_frames) == 0:
+            return torch.ones(n_frames) * 0.5  # uncertain
+
+        # Step 3: For each predicted beat, is it correct? (within tolerance of GT)
+        # [P] vs [G] -> [P, G] distances
+        pred_to_gt = torch.abs(pred_frames.unsqueeze(1) - gt_frames.unsqueeze(0))
+        pred_correct = pred_to_gt.min(dim=1).values <= tolerance_frames  # [P] bool
+
+        # Step 4: Compute regional accuracy with a sliding window
+        # Place correct/incorrect scores at predicted beat positions, then smooth
+        accuracy_signal = torch.full((n_frames,), float('nan'))
+        for i, pf in enumerate(pred_frames.long()):
+            accuracy_signal[pf] = 1.0 if pred_correct[i] else 0.0
+
+        # Smooth: for each frame, average the accuracy of predicted beats in window
+        regional = torch.zeros(n_frames)
+        half_w = window_frames // 2
+        for f in range(n_frames):
+            lo = max(0, f - half_w)
+            hi = min(n_frames, f + half_w + 1)
+            window = accuracy_signal[lo:hi]
+            valid = window[~torch.isnan(window)]
+            if len(valid) > 0:
+                regional[f] = valid.mean()
+            else:
+                regional[f] = 0.5  # no predictions in window → uncertain
+
+        return regional
