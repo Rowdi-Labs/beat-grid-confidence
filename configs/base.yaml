@@ -1,0 +1,61 @@
+# Base training configuration for beat-grid-confidence
+# All heads trained on frozen beat_this backbone
+
+model:
+  backbone: "beat_this_small"  # or "beat_this_final" for server-side
+  checkpoint: null  # Path to beat_this checkpoint (download separately)
+  hidden_dim: 256  # beat_this small hidden dimension
+  freeze_backbone: true
+  heads:
+    confidence: true
+    tempo_distribution: true
+  tempo_bins: 141  # 60-200 BPM in 1-BPM steps
+  bpm_min: 60.0
+  bpm_max: 200.0
+
+data:
+  sample_rate: 22050
+  hop_length: 441  # ~10ms per frame at 22050 Hz
+  n_mels: 128
+  chunk_frames: 2048  # ~20 seconds per chunk
+  overlap_frames: 256
+  augment: true
+  beat_tolerance_sec: 0.050  # 50ms tolerance for correctness labels
+  spectrogram_dir: "data/spectrograms"
+  annotations_dir: "data/annotations"
+  splits_dir: "data/splits"
+
+training:
+  batch_size: 16
+  learning_rate: 1.0e-3
+  weight_decay: 1.0e-4
+  max_epochs: 50
+  early_stopping_patience: 10
+  optimizer: "adamw"
+  scheduler: "cosine"
+  warmup_epochs: 3
+  gradient_clip_val: 1.0
+
+loss:
+  lambda_confidence: 1.0
+  lambda_tempo: 0.5
+  confidence_pos_weight: 1.0
+  tempo_sigma_bpm: 2.0
+
+evaluation:
+  confidence_threshold: 0.5
+  beat_tolerance_sec: 0.050
+  relock_min_gap_sec: 0.5
+
+hardware:
+  accelerator: "auto"  # "gpu", "tpu", "cpu"
+  devices: 1
+  precision: "16-mixed"
+
+logging:
+  project: "beat-grid-confidence"
+  entity: null  # wandb entity
+  log_every_n_steps: 10
+  save_top_k: 3
+  monitor: "val/confidence_brier"
+  mode: "min"

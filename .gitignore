@@ -1,0 +1,52 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Data — audio files never committed
+data/audio/
+data/raw/
+*.wav
+*.mp3
+*.flac
+*.ogg
+*.aac
+
+# Model weights
+*.onnx
+*.pt
+*.pth
+*.ckpt
+checkpoints/
+outputs/
+wandb/
+lightning_logs/
+
+# Grant applications and private docs
+.grants/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Misc
+*.log

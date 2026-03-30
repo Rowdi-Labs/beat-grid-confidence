@@ -1,0 +1,61 @@
+# Phase 1 configuration: confidence head only
+# Simplest possible experiment to validate that confidence is learnable
+
+model:
+  backbone: "beat_this_small"
+  checkpoint: null
+  hidden_dim: 256
+  freeze_backbone: true
+  heads:
+    confidence: true
+    tempo_distribution: false  # disabled for Phase 1
+  tempo_bins: 141
+  bpm_min: 60.0
+  bpm_max: 200.0
+
+data:
+  sample_rate: 22050
+  hop_length: 441
+  n_mels: 128
+  chunk_frames: 2048
+  overlap_frames: 256
+  augment: true
+  beat_tolerance_sec: 0.050
+  spectrogram_dir: "data/spectrograms"
+  annotations_dir: "data/annotations"
+  splits_dir: "data/splits"
+
+training:
+  batch_size: 32  # can be larger since only training 257 params
+  learning_rate: 3.0e-3  # higher LR for tiny head
+  weight_decay: 0.0
+  max_epochs: 30
+  early_stopping_patience: 5
+  optimizer: "adamw"
+  scheduler: "cosine"
+  warmup_epochs: 1
+  gradient_clip_val: 1.0
+
+loss:
+  lambda_confidence: 1.0
+  lambda_tempo: 0.0  # disabled
+  confidence_pos_weight: 1.0
+  tempo_sigma_bpm: 2.0
+
+evaluation:
+  confidence_threshold: 0.5
+  beat_tolerance_sec: 0.050
+  relock_min_gap_sec: 0.5
+
+hardware:
+  accelerator: "auto"
+  devices: 1
+  precision: "32"  # full precision for tiny model
+
+logging:
+  project: "beat-grid-confidence"
+  entity: null
+  log_every_n_steps: 10
+  save_top_k: 3
+  monitor: "val/confidence_brier"
+  mode: "min"
