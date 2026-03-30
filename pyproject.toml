@@ -59,6 +59,9 @@ bgc-train = "scripts.train:main"
 bgc-evaluate = "scripts.evaluate:main"
 bgc-export = "scripts.export_onnx:main"
 
+[tool.hatch.metadata]
+allow-direct-references = true
+
 [tool.ruff]
 target-version = "py311"
 line-length = 100

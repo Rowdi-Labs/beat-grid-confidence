@@ -235,8 +235,8 @@ class BeatGridConfidenceDataset(Dataset):
             spec, beat_target, downbeat_target
         )
 
-        # Transpose to beat_this input format: [128, T] (freq, time)
-        spec = spec.T
+        # beat_this expects [T, 128] (time-first) — our spectrograms
+        # are already stored as [T, n_mels], so no transpose needed
 
         return {
             "spectrogram": spec,

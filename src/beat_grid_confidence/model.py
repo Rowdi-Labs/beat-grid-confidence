@@ -54,7 +54,8 @@ class BeatGridConfidenceModel(nn.Module):
         """Forward pass through backbone + heads.
 
         Args:
-            spectrogram: Mel spectrogram [B, 128, T] (beat_this input format)
+            spectrogram: Mel spectrogram [B, T, 128] (time-first, beat_this format).
+                         The frontend internally rearranges to [B, F, T] for BatchNorm.
 
         Returns:
             Dictionary with keys:
@@ -66,6 +67,7 @@ class BeatGridConfidenceModel(nn.Module):
         """
         # Split the backbone forward pass to extract hidden states
         # beat_this structure: frontend → transformer_blocks → task_heads
+        # Input: [B, T, 128] — frontend handles rearrangement internally
         x = self.backbone.frontend(spectrogram)  # [B, T, 512]
         hidden = self.backbone.transformer_blocks(x)  # [B, T, 512]
 
@@ -107,9 +109,8 @@ def load_backbone(
 
     model = load_model(checkpoint_path=checkpoint_path, device=device)
 
-    # Extract hidden dim from model config
-    # beat_this stores hyperparameters in the checkpoint
-    hidden_dim = model.transformer_blocks.norm.weight.shape[0]
+    # Extract hidden dim from the task heads linear layer
+    hidden_dim = model.task_heads.beat_downbeat_lin.in_features
 
     return model, hidden_dim
 
