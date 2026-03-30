@@ -4,7 +4,7 @@
 model:
   backbone: "beat_this_small"  # or "beat_this_final" for server-side
   checkpoint: null  # Path to beat_this checkpoint (download separately)
-  hidden_dim: 256  # beat_this small hidden dimension
+  hidden_dim: 512  # beat_this transformer_dim (both small and final variants)
   freeze_backbone: true
   heads:
     confidence: true

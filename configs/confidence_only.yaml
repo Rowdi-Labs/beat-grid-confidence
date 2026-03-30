@@ -4,7 +4,7 @@
 model:
   backbone: "beat_this_small"
   checkpoint: null
-  hidden_dim: 256
+  hidden_dim: 512
   freeze_backbone: true
   heads:
     confidence: true

@@ -16,7 +16,7 @@ class ConfidenceHead(nn.Module):
     beat is within 50ms of the predicted beat, 0 otherwise.
     """
 
-    def __init__(self, hidden_dim: int) -> None:
+    def __init__(self, hidden_dim: int = 512) -> None:
         super().__init__()
         self.projection = nn.Linear(hidden_dim, 1)
 
@@ -41,7 +41,7 @@ class TempoDistributionHead(nn.Module):
     Default bins: 141 bins spanning 60-200 BPM in 1-BPM steps.
     """
 
-    def __init__(self, hidden_dim: int, n_bins: int = 141, bpm_min: float = 60.0) -> None:
+    def __init__(self, hidden_dim: int = 512, n_bins: int = 141, bpm_min: float = 60.0) -> None:
         super().__init__()
         self.projection = nn.Linear(hidden_dim, n_bins)
         self.n_bins = n_bins
