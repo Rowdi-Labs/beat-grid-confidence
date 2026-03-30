@@ -22,14 +22,20 @@ env/
 # Jupyter
 .ipynb_checkpoints/
 
-# Data — audio files never committed
+# Data — audio, spectrograms, and annotations never committed
 data/audio/
+data/spectrograms/
+data/beat_this_annotations/
 data/raw/
 *.wav
 *.mp3
 *.flac
 *.ogg
 *.aac
+*.au
+*.npy
+*.npz
+*.tar.gz
 
 # Model weights
 *.onnx
