@@ -19,13 +19,13 @@ from beat_grid_confidence.decode import decode_confidence_aware
 class TestConfidenceHead:
     def test_output_shape(self) -> None:
         head = ConfidenceHead(hidden_dim=512)
-        x = torch.randn(2, 100, 256)
+        x = torch.randn(2, 100, 512)
         out = head(x)
         assert out.shape == (2, 100)
 
     def test_output_range(self) -> None:
         head = ConfidenceHead(hidden_dim=512)
-        x = torch.randn(2, 100, 256)
+        x = torch.randn(2, 100, 512)
         out = head(x)
         assert out.min() >= 0.0
         assert out.max() <= 1.0
@@ -34,20 +34,20 @@ class TestConfidenceHead:
 class TestTempoDistributionHead:
     def test_output_shape(self) -> None:
         head = TempoDistributionHead(hidden_dim=512, n_bins=141)
-        x = torch.randn(2, 100, 256)
+        x = torch.randn(2, 100, 512)
         out = head(x)
         assert out.shape == (2, 100, 141)
 
     def test_output_sums_to_one(self) -> None:
         head = TempoDistributionHead(hidden_dim=512, n_bins=141)
-        x = torch.randn(2, 100, 256)
+        x = torch.randn(2, 100, 512)
         out = head(x)
         sums = out.sum(dim=-1)
         assert torch.allclose(sums, torch.ones_like(sums), atol=1e-5)
 
     def test_expected_tempo(self) -> None:
         head = TempoDistributionHead(hidden_dim=512, n_bins=141, bpm_min=60.0)
-        x = torch.randn(1, 10, 256)
+        x = torch.randn(1, 10, 512)
         dist = head(x)
         expected = head.expected_tempo(dist)
         assert expected.shape == (1, 10)

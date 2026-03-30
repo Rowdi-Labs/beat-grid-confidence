@@ -1,70 +1,213 @@
-"""Dataset loading, annotation parsing, and augmentation for beat grid confidence training."""
+"""Dataset loading for beat_this annotations format.
+
+beat_this annotations use .beats files (tab-separated: time, beat_position)
+where beat_position=1 indicates a downbeat. Spectrograms are pre-extracted
+as .npy/.npz files at 22050 Hz, 128 mel bins, hop_length=441 (50 FPS).
+
+See: https://github.com/CPJKU/beat_this_annotations
+"""
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import json
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 import numpy as np
 import torch
 from torch.utils.data import Dataset
 
 
-@dataclass
-class BeatAnnotation:
-    """Beat/downbeat annotations for a single track."""
+# beat_this spectrogram parameters (must match pre-extraction)
+SAMPLE_RATE = 22050
+HOP_LENGTH = 441
+N_MELS = 128
+FRAME_RATE = SAMPLE_RATE / HOP_LENGTH  # ~50 FPS
 
-    audio_path: Path
+
+@dataclass
+class TrackAnnotation:
+    """Parsed annotation for a single track."""
+
+    stem: str  # e.g. "ballroom_Albums-AnaBelen_Veneo-01"
+    dataset: str  # e.g. "ballroom"
     beat_times: np.ndarray  # seconds
-    downbeat_times: np.ndarray  # seconds
-    duration: float  # seconds
-    dataset_name: str
-    license: str  # e.g., "MIT", "CC-BY-4.0"
-
-    def is_commercially_clean(self) -> bool:
-        """Check if this annotation's license permits commercial training."""
-        clean_licenses = {"MIT", "Apache-2.0", "CC-BY-4.0", "CC-BY-SA-4.0", "CC0-1.0"}
-        return self.license in clean_licenses
+    downbeat_times: np.ndarray  # seconds (empty if dataset has no downbeats)
+    has_downbeats: bool
+    fold: int  # 0-7 for cross-validation
 
 
-@dataclass
-class ConfidenceTarget:
-    """Training targets for the confidence head."""
+def load_beats_file(path: Path) -> tuple[np.ndarray, np.ndarray]:
+    """Load a .beats annotation file.
 
-    correctness_mask: np.ndarray  # [T] binary: 1 if beat prediction is correct
-    region_labels: list[dict[str, Any]] = field(default_factory=list)  # labeled difficulty regions
+    Args:
+        path: Path to .beats file
+
+    Returns:
+        Tuple of (beat_times, downbeat_times). downbeat_times is empty
+        if the file has no beat position column.
+    """
+    data = np.loadtxt(path)
+
+    if data.ndim == 1:
+        # 1D format: beat times only, no downbeat info
+        return data, np.array([])
+
+    # 2D format: [time, beat_position] where position=1 is downbeat
+    beat_times = data[:, 0]
+    beat_positions = data[:, 1]
+    downbeat_times = beat_times[beat_positions == 1]
+
+    return beat_times, downbeat_times
 
 
-class BeatGridDataset(Dataset):
-    """Dataset for training confidence heads on beat_this backbone outputs.
+def load_dataset_annotations(
+    annotations_dir: Path,
+    dataset_name: str,
+) -> list[TrackAnnotation]:
+    """Load all annotations for a dataset.
 
-    Loads pre-computed mel spectrograms and beat annotations.
-    Generates confidence targets from ground-truth beat positions.
+    Args:
+        annotations_dir: Root of beat_this_annotations clone
+        dataset_name: e.g. "ballroom", "hainsworth"
+
+    Returns:
+        List of TrackAnnotation for each track
+    """
+    dataset_dir = annotations_dir / dataset_name
+
+    # Check if dataset has downbeats
+    info_path = dataset_dir / "info.json"
+    has_downbeats = False
+    if info_path.exists():
+        with open(info_path) as f:
+            info = json.load(f)
+            has_downbeats = info.get("has_downbeats", False)
+
+    # Load fold assignments
+    folds: dict[str, int] = {}
+    folds_path = dataset_dir / "8-folds.split"
+    if folds_path.exists():
+        with open(folds_path) as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    parts = line.split("\t")
+                    if len(parts) == 2:
+                        folds[parts[0]] = int(parts[1])
+
+    # Load each .beats file
+    beats_dir = dataset_dir / "annotations" / "beats"
+    if not beats_dir.exists():
+        return []
+
+    annotations = []
+    for beats_path in sorted(beats_dir.glob("*.beats")):
+        stem = beats_path.stem
+        beat_times, downbeat_times = load_beats_file(beats_path)
+
+        if not has_downbeats:
+            downbeat_times = np.array([])
+
+        annotations.append(TrackAnnotation(
+            stem=stem,
+            dataset=dataset_name,
+            beat_times=beat_times,
+            downbeat_times=downbeat_times,
+            has_downbeats=has_downbeats,
+            fold=folds.get(stem, -1),
+        ))
+
+    return annotations
+
+
+def load_all_annotations(
+    annotations_dir: Path,
+    datasets: list[str] | None = None,
+) -> list[TrackAnnotation]:
+    """Load annotations from all (or specified) datasets.
+
+    Args:
+        annotations_dir: Root of beat_this_annotations clone
+        datasets: List of dataset names, or None for all
+
+    Returns:
+        Combined list of TrackAnnotation across all datasets
+    """
+    if datasets is None:
+        # Discover all datasets
+        datasets = [
+            d.name for d in sorted(annotations_dir.iterdir())
+            if d.is_dir() and (d / "annotations" / "beats").exists()
+        ]
+
+    all_annotations = []
+    for name in datasets:
+        anns = load_dataset_annotations(annotations_dir, name)
+        all_annotations.extend(anns)
+        print(f"  {name}: {len(anns)} tracks (downbeats: {anns[0].has_downbeats if anns else 'N/A'})")
+
+    print(f"Total: {len(all_annotations)} tracks from {len(datasets)} datasets")
+    return all_annotations
+
+
+def make_splits(
+    annotations: list[TrackAnnotation],
+    val_fold: int = 0,
+    test_fold: int = 1,
+) -> tuple[list[TrackAnnotation], list[TrackAnnotation], list[TrackAnnotation]]:
+    """Split annotations into train/val/test using 8-fold assignments.
+
+    Standard beat_this protocol: fold N = val, fold (N+1)%8 = test, rest = train.
+
+    Args:
+        annotations: All annotations
+        val_fold: Fold number for validation
+        test_fold: Fold number for test
+
+    Returns:
+        Tuple of (train, val, test) annotation lists
+    """
+    train, val, test = [], [], []
+    unassigned = []
+
+    for ann in annotations:
+        if ann.fold == val_fold:
+            val.append(ann)
+        elif ann.fold == test_fold:
+            test.append(ann)
+        elif ann.fold >= 0:
+            train.append(ann)
+        else:
+            unassigned.append(ann)
+
+    # Unassigned tracks (no fold info) go to training
+    train.extend(unassigned)
+
+    print(f"Split: train={len(train)}, val={len(val)}, test={len(test)}")
+    return train, val, test
+
+
+class BeatGridConfidenceDataset(Dataset):
+    """PyTorch dataset for training confidence heads.
+
+    Loads pre-extracted spectrograms and beat annotations.
+    Generates confidence correctness targets from ground-truth beat positions.
     """
 
     TOLERANCE_SEC = 0.050  # 50ms tolerance for beat correctness
 
     def __init__(
         self,
-        annotations: list[BeatAnnotation],
+        annotations: list[TrackAnnotation],
         spectrogram_dir: Path,
-        sample_rate: int = 22050,
-        hop_length: int = 441,
-        chunk_frames: int = 2048,
+        chunk_frames: int = 1500,
         augment: bool = False,
     ) -> None:
-        self.annotations = [a for a in annotations if a.is_commercially_clean()]
+        self.annotations = annotations
         self.spectrogram_dir = spectrogram_dir
-        self.sample_rate = sample_rate
-        self.hop_length = hop_length
         self.chunk_frames = chunk_frames
         self.augment = augment
-        self.frame_rate = sample_rate / hop_length  # frames per second
-
-        if len(self.annotations) < len(annotations):
-            n_filtered = len(annotations) - len(self.annotations)
-            print(f"Filtered {n_filtered} annotations with non-commercial licenses")
 
     def __len__(self) -> int:
         return len(self.annotations)
@@ -72,92 +215,118 @@ class BeatGridDataset(Dataset):
     def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
         ann = self.annotations[idx]
 
-        # Load pre-computed spectrogram
-        spec_path = self.spectrogram_dir / f"{ann.audio_path.stem}.pt"
-        spectrogram = torch.load(spec_path, weights_only=True)  # [T, n_mels]
+        # Load pre-extracted spectrogram
+        # beat_this stores these in {dataset}/ subdirs as .npy or in .npz bundles
+        spec = self._load_spectrogram(ann)
+        n_frames = spec.shape[0]
 
-        # Generate frame-level beat targets
-        beat_frames = self._times_to_frames(ann.beat_times)
-        downbeat_frames = self._times_to_frames(ann.downbeat_times)
+        # Create frame-level beat/downbeat targets
+        beat_target = self._times_to_target(ann.beat_times, n_frames)
+        downbeat_target = self._times_to_target(ann.downbeat_times, n_frames)
 
-        n_frames = spectrogram.shape[0]
-        beat_target = self._make_target_vector(beat_frames, n_frames)
-        downbeat_target = self._make_target_vector(downbeat_frames, n_frames)
-
-        # Apply augmentations if enabled
+        # Apply augmentations
         if self.augment:
-            spectrogram, beat_target, downbeat_target = self._augment(
-                spectrogram, beat_target, downbeat_target
+            spec, beat_target, downbeat_target = self._augment(
+                spec, beat_target, downbeat_target
             )
 
         # Chunk to fixed length
-        spectrogram, beat_target, downbeat_target = self._chunk(
-            spectrogram, beat_target, downbeat_target
+        spec, beat_target, downbeat_target = self._chunk(
+            spec, beat_target, downbeat_target
         )
 
+        # Transpose to beat_this input format: [128, T] (freq, time)
+        spec = spec.T
+
         return {
-            "spectrogram": spectrogram,
+            "spectrogram": spec,
             "beat_target": beat_target,
             "downbeat_target": downbeat_target,
+            "stem": ann.stem,
         }
 
-    def _times_to_frames(self, times: np.ndarray) -> np.ndarray:
-        """Convert beat times in seconds to frame indices."""
-        return np.round(times * self.frame_rate).astype(np.int64)
+    def _load_spectrogram(self, ann: TrackAnnotation) -> torch.Tensor:
+        """Load pre-extracted spectrogram for a track.
 
-    def _make_target_vector(self, frames: np.ndarray, n_frames: int) -> torch.Tensor:
-        """Create a binary target vector from frame indices."""
+        Tries .npy file first, then .npz bundle.
+        """
+        # Try individual .npy file
+        npy_path = self.spectrogram_dir / ann.dataset / f"{ann.stem}.npy"
+        if npy_path.exists():
+            data = np.load(npy_path, mmap_mode="r")
+            return torch.from_numpy(np.array(data)).float()
+
+        # Try .npz bundle
+        npz_path = self.spectrogram_dir / ann.dataset / f"{ann.dataset}.npz"
+        if npz_path.exists():
+            with np.load(npz_path, allow_pickle=False) as bundle:
+                if ann.stem in bundle:
+                    return torch.from_numpy(bundle[ann.stem]).float()
+
+        raise FileNotFoundError(
+            f"No spectrogram found for {ann.stem}. "
+            f"Checked: {npy_path} and {npz_path}. "
+            f"Run beat_this spectrogram extraction first."
+        )
+
+    def _times_to_target(self, times: np.ndarray, n_frames: int) -> torch.Tensor:
+        """Convert beat/downbeat times to frame-level binary target."""
+        if len(times) == 0:
+            return torch.zeros(n_frames)
+
         target = torch.zeros(n_frames)
+        frames = np.round(times * FRAME_RATE).astype(np.int64)
         valid = frames[(frames >= 0) & (frames < n_frames)]
         target[valid] = 1.0
         return target
 
     def _chunk(
         self,
-        spectrogram: torch.Tensor,
+        spec: torch.Tensor,
         beat_target: torch.Tensor,
         downbeat_target: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Extract a random chunk of fixed length."""
-        n_frames = spectrogram.shape[0]
+        n_frames = spec.shape[0]
+
         if n_frames <= self.chunk_frames:
-            # Pad if too short
             pad = self.chunk_frames - n_frames
-            spectrogram = torch.nn.functional.pad(spectrogram, (0, 0, 0, pad))
+            spec = torch.nn.functional.pad(spec, (0, 0, 0, pad))
             beat_target = torch.nn.functional.pad(beat_target, (0, pad))
             downbeat_target = torch.nn.functional.pad(downbeat_target, (0, pad))
         else:
             start = torch.randint(0, n_frames - self.chunk_frames, (1,)).item()
-            spectrogram = spectrogram[start : start + self.chunk_frames]
-            beat_target = beat_target[start : start + self.chunk_frames]
-            downbeat_target = downbeat_target[start : start + self.chunk_frames]
+            end = start + self.chunk_frames
+            spec = spec[start:end]
+            beat_target = beat_target[start:end]
+            downbeat_target = downbeat_target[start:end]
 
-        return spectrogram, beat_target, downbeat_target
+        return spec, beat_target, downbeat_target
 
     def _augment(
         self,
-        spectrogram: torch.Tensor,
+        spec: torch.Tensor,
         beat_target: torch.Tensor,
         downbeat_target: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Apply augmentations that create synthetic low-confidence regions.
+        """Synthetic augmentations for confidence head training.
 
-        These are specifically designed to train the confidence head:
-        - Silence injection: zero out a random segment (simulates breakdown)
-        - Energy drop: attenuate a segment by 20-40dB (simulates sparse intro)
-        - Spectral masking: zero random frequency bands (simulates missing instruments)
+        Creates artificial low-confidence regions by corrupting the spectrogram.
+        These teach the confidence head that corrupted regions are unreliable.
         """
-        n_frames = spectrogram.shape[0]
+        n_frames = spec.shape[0]
 
-        if torch.rand(1).item() < 0.3:  # 30% chance of silence injection
-            length = torch.randint(50, min(200, n_frames // 4), (1,)).item()
+        # Silence injection (simulates breakdown)
+        if torch.rand(1).item() < 0.3:
+            length = torch.randint(50, min(200, max(51, n_frames // 4)), (1,)).item()
             start = torch.randint(0, max(1, n_frames - length), (1,)).item()
-            spectrogram[start : start + length] = 0.0
+            spec[start : start + length] = 0.0
 
-        if torch.rand(1).item() < 0.3:  # 30% chance of energy drop
-            length = torch.randint(50, min(200, n_frames // 4), (1,)).item()
+        # Energy drop (simulates sparse intro)
+        if torch.rand(1).item() < 0.3:
+            length = torch.randint(50, min(200, max(51, n_frames // 4)), (1,)).item()
             start = torch.randint(0, max(1, n_frames - length), (1,)).item()
             attenuation = 10 ** (-torch.rand(1).item() * 2 - 1)  # -20 to -40 dB
-            spectrogram[start : start + length] *= attenuation
+            spec[start : start + length] *= attenuation
 
-        return spectrogram, beat_target, downbeat_target
+        return spec, beat_target, downbeat_target
