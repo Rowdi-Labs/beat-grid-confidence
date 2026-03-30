@@ -119,7 +119,7 @@ These are what differentiate this project from standard beat tracking research:
 
 ## Project Phases and Gates
 
-**Phase 0 (current):** Reproduce baseline, build evaluation harness
+**Phase 0 (COMPLETE):** Baseline reproduced on Ballroom (Beat F1: 0.899, AMLt: 0.928, CMLt: 0.791)
 **Phase 1:** Train confidence head, curate hard cases
 **Gate 1:** Brier < 0.15, confidence correlates with error (r > 0.5)
 **Phase 2:** Tempo distribution head, confidence-aware decoder, paper
