@@ -343,3 +343,104 @@ class BeatGridConfidenceDataset(Dataset):
             spec[start : start + length] *= attenuation
 
         return spec, beat_target, downbeat_target
+
+
+class HiddenStatesDataset(Dataset):
+    """Dataset that loads pre-extracted hidden states instead of spectrograms.
+
+    Since the backbone is frozen, hidden states are deterministic. Pre-extracting
+    them (via scripts/extract_hidden_states.py) eliminates the 20M-param backbone
+    from the training loop, reducing memory from ~16GB to ~100MB per batch.
+
+    Memory budget per batch (batch=32, T=1500, D=512):
+        hidden states: 32 * 1500 * 512 * 4B = 94 MB
+        beat targets:  32 * 1500 * 4B       = 0.18 MB
+        head params:   513 * 4B             = 0.002 MB
+        Total: ~95 MB
+    """
+
+    def __init__(
+        self,
+        annotations: list[TrackAnnotation],
+        hidden_states_dir: Path,
+        chunk_frames: int = 1500,
+    ) -> None:
+        self.annotations = annotations
+        self.hidden_states_dir = hidden_states_dir
+        self.chunk_frames = chunk_frames
+
+    def __len__(self) -> int:
+        return len(self.annotations)
+
+    def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
+        ann = self.annotations[idx]
+
+        # Load pre-extracted hidden states [T, 512] (stored as float16)
+        npy_path = self.hidden_states_dir / ann.dataset / f"{ann.stem}.npy"
+        if not npy_path.exists():
+            raise FileNotFoundError(
+                f"No hidden states for {ann.stem}. "
+                f"Run: python scripts/extract_hidden_states.py --datasets {ann.dataset}"
+            )
+        hidden = torch.from_numpy(np.load(npy_path).astype(np.float32))
+        n_frames = hidden.shape[0]
+
+        # Create frame-level beat/downbeat targets
+        beat_target = self._times_to_target(ann.beat_times, n_frames)
+        downbeat_target = self._times_to_target(ann.downbeat_times, n_frames)
+
+        # Generate correctness mask (vectorized)
+        correctness = self._compute_correctness_mask(beat_target, n_frames)
+
+        # Chunk to fixed length
+        if self.chunk_frames > 0 and n_frames > self.chunk_frames:
+            start = torch.randint(0, n_frames - self.chunk_frames, (1,)).item()
+            end = start + self.chunk_frames
+            hidden = hidden[start:end]
+            beat_target = beat_target[start:end]
+            downbeat_target = downbeat_target[start:end]
+            correctness = correctness[start:end]
+        elif self.chunk_frames > 0 and n_frames < self.chunk_frames:
+            pad = self.chunk_frames - n_frames
+            hidden = torch.nn.functional.pad(hidden, (0, 0, 0, pad))
+            beat_target = torch.nn.functional.pad(beat_target, (0, pad))
+            downbeat_target = torch.nn.functional.pad(downbeat_target, (0, pad))
+            correctness = torch.nn.functional.pad(correctness, (0, pad))
+
+        return {
+            "hidden_states": hidden,
+            "beat_target": beat_target,
+            "downbeat_target": downbeat_target,
+            "correctness": correctness,
+        }
+
+    def _times_to_target(self, times: np.ndarray, n_frames: int) -> torch.Tensor:
+        if len(times) == 0:
+            return torch.zeros(n_frames)
+        target = torch.zeros(n_frames)
+        frames = np.round(times * FRAME_RATE).astype(np.int64)
+        valid = frames[(frames >= 0) & (frames < n_frames)]
+        target[valid] = 1.0
+        return target
+
+    @staticmethod
+    def _compute_correctness_mask(
+        beat_target: torch.Tensor,
+        n_frames: int,
+        tolerance_frames: int = 3,  # 50ms at 50fps = 2.5 frames, round to 3
+    ) -> torch.Tensor:
+        """Vectorized correctness mask: 1 if a GT beat is within tolerance.
+
+        Uses broadcasting instead of nested Python loops.
+        O(T * G) memory where G = number of GT beats (~60 per 30s track).
+        """
+        gt_frames = torch.where(beat_target > 0.5)[0]  # [G]
+        if len(gt_frames) == 0:
+            return torch.zeros(n_frames)
+
+        # [T] - [G] -> [T, G] distance matrix, then min over G
+        all_frames = torch.arange(n_frames, dtype=torch.float32)  # [T]
+        distances = torch.abs(all_frames.unsqueeze(1) - gt_frames.unsqueeze(0).float())  # [T, G]
+        min_distances = distances.min(dim=1).values  # [T]
+
+        return (min_distances <= tolerance_frames).float()
