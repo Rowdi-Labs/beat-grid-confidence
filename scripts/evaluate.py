@@ -68,10 +68,10 @@ def evaluate_track(
         beat_scores = mir_eval.beat.evaluate(beat_times_gt, pred_beats)
         results["beat_f1"] = beat_scores["F-measure"]
         results["beat_cemgil"] = beat_scores["Cemgil"]
-        results["beat_cml_t"] = beat_scores["CMLt"]
-        results["beat_cml_c"] = beat_scores["CMLc"]
-        results["beat_aml_t"] = beat_scores["AMLt"]
-        results["beat_aml_c"] = beat_scores["AMLc"]
+        results["beat_cml_t"] = beat_scores["Correct Metric Level Total"]
+        results["beat_cml_c"] = beat_scores["Correct Metric Level Continuous"]
+        results["beat_aml_t"] = beat_scores["Any Metric Level Total"]
+        results["beat_aml_c"] = beat_scores["Any Metric Level Continuous"]
 
     if len(pred_downbeats) > 0 and len(downbeat_times_gt) > 0:
         db_scores = mir_eval.beat.evaluate(downbeat_times_gt, pred_downbeats)
@@ -184,15 +184,17 @@ def main() -> None:
     parser.add_argument("--baseline", action="store_true", help="Evaluate baseline beat_this only")
     parser.add_argument("--annotations-dir", type=Path, required=True)
     parser.add_argument("--spectrogram-dir", type=Path, required=True)
+    parser.add_argument("--datasets", type=str, nargs="+", default=None,
+                        help="Only evaluate these datasets (e.g., ballroom hainsworth)")
     parser.add_argument("--output", type=Path, default=Path("outputs/evaluation.json"))
     parser.add_argument("--test-fold", type=int, default=1)
     parser.add_argument("--val-fold", type=int, default=0)
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     args = parser.parse_args()
 
-    # Load annotations
+    # Load annotations (filter to available datasets if specified)
     console.print("[bold]Loading annotations...[/bold]")
-    all_annotations = load_all_annotations(args.annotations_dir)
+    all_annotations = load_all_annotations(args.annotations_dir, datasets=args.datasets)
     _, _, test_anns = make_splits(all_annotations, val_fold=args.val_fold, test_fold=args.test_fold)
 
     # Load model

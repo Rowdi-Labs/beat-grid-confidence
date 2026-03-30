@@ -47,7 +47,17 @@ def load_beats_file(path: Path) -> tuple[np.ndarray, np.ndarray]:
         Tuple of (beat_times, downbeat_times). downbeat_times is empty
         if the file has no beat position column.
     """
-    data = np.loadtxt(path)
+    try:
+        data = np.loadtxt(path)
+    except ValueError:
+        return np.array([]), np.array([])
+
+    if data.size == 0:
+        return np.array([]), np.array([])
+
+    if data.ndim == 1 and data.shape[0] <= 2:
+        # Single beat entry — treat as 1D
+        return np.atleast_1d(data[0] if data.ndim == 1 and data.shape[0] == 2 else data), np.array([])
 
     if data.ndim == 1:
         # 1D format: beat times only, no downbeat info
@@ -286,7 +296,10 @@ class BeatGridConfidenceDataset(Dataset):
         beat_target: torch.Tensor,
         downbeat_target: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Extract a random chunk of fixed length."""
+        """Extract a random chunk of fixed length. If chunk_frames <= 0, return full track."""
+        if self.chunk_frames <= 0:
+            return spec, beat_target, downbeat_target
+
         n_frames = spec.shape[0]
 
         if n_frames <= self.chunk_frames:
