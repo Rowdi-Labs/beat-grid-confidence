@@ -11,6 +11,7 @@
 \usepackage{authblk}
 \usepackage{caption}
 \usepackage{subcaption}
+\graphicspath{{figures/}}
 
 \title{Product-Oriented Evaluation of Beat Grid Decoding:\\Correction Effort as a Complement to F-Measure}
 
@@ -178,10 +179,30 @@ Tempo-regularized decoding reduces correction effort by 41\% (from 4.22 to 2.49 
 while F-measure decreases by 4.4\% (from 0.915 to 0.871).
 This demonstrates that F-measure and correction effort capture different aspects of grid quality:
 the tempo constraint produces a more consistent grid that requires fewer manual fixes,
-even though individual beat placements are less precise.
+even though individual beat placements are less precise (Figure~\ref{fig:decoder}).
 
 For a user managing a library of 500 tracks, this difference translates to approximately
 865 fewer manual anchor corrections---a meaningful reduction in preparation time.
+The distribution of correction effort (Figure~\ref{fig:effort_dist}) shows that
+tempo-regularized decoding shifts the mass toward zero---more tracks require no fixes at all.
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=\linewidth]{fig1_decoder_comparison.pdf}
+\caption{Per-track comparison of peak-picking vs.\ tempo-regularized decoding.
+(a)~F-measure: many tracks cluster near the diagonal, with some where peak-picking wins.
+(b)~Correction effort: tempo-regularized decoding is below the diagonal for most tracks,
+indicating fewer manual fixes needed.}
+\label{fig:decoder}
+\end{figure}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.55\linewidth]{fig5_effort_distribution.pdf}
+\caption{Distribution of correction effort across 785 tracks.
+Tempo-regularized decoding concentrates more tracks at low effort values.}
+\label{fig:effort_dist}
+\end{figure}
 
 \subsection{Per-Dataset Breakdown}
 
@@ -258,11 +279,34 @@ trained head catches 44\% of high-effort tracks versus 46\% for peak activation 
 and 20\% for random selection.
 
 This suggests that the backbone's own activation strength is already an effective
-confidence proxy, and that learned confidence estimation provides only marginal
+confidence proxy (Figure~\ref{fig:confidence}), and that learned confidence estimation provides only marginal
 improvement on these datasets.
+In a triage scenario (Figure~\ref{fig:triage}), both the trained head and peak activation
+achieve approximately 2.2$\times$ random recall when checking 20\% of the library,
+confirming practical utility but limited differentiation.
+
 We hypothesize that larger, more diverse datasets with more extreme failure cases
 (e.g., live recordings, non-Western music, extended breakdowns) would create
 greater separation between trained and heuristic approaches.
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=\linewidth]{fig2_confidence_vs_effort.pdf}
+\caption{Per-track confidence vs.\ correction effort.
+(a)~Trained MLP head. (b)~Untrained peak activation heuristic.
+Both show similar discriminative power, with Ballroom (blue) clustering
+at high confidence and low effort, and GTZAN (red) showing more spread.}
+\label{fig:confidence}
+\end{figure}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.55\linewidth]{fig3_triage_recall.pdf}
+\caption{Triage recall curve: checking the $K$\% lowest-confidence tracks,
+what fraction of high-effort tracks are caught?
+Both trained and heuristic methods achieve $\sim$2$\times$ random baseline.}
+\label{fig:triage}
+\end{figure}
 
 \section{Discussion}
 
@@ -277,6 +321,22 @@ standard metrics.
 We recommend that future beat tracking evaluations report correction effort
 alongside F-measure, particularly when the intended application involves
 human-in-the-loop grid editing.
+
+\subsection{Qualitative Examples}
+
+Figure~\ref{fig:examples} shows beat activations and confidence for an easy track
+(high F1, zero corrections) and a hard track (low F1, multiple corrections needed).
+On the easy track, both activations and confidence are uniformly high.
+On the hard track, activations become ambiguous during rhythmically complex passages,
+and confidence drops in those regions---though not as sharply as the actual accuracy loss.
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=\linewidth]{fig4_example_tracks.pdf}
+\caption{Beat activation (blue) and confidence (red) for an easy and hard track.
+Vertical green lines: ground-truth beats. Dashed red: predicted beats.}
+\label{fig:examples}
+\end{figure}
 
 \subsection{The 90\% Problem}
 
