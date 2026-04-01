@@ -24,6 +24,7 @@ env/
 
 # Data — audio, spectrograms, and annotations never committed
 data/audio/
+data/mirdata_cache/
 data/spectrograms/
 data/beat_this_annotations/
 data/raw/

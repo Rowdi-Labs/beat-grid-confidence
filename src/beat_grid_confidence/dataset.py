@@ -370,9 +370,19 @@ class HiddenStatesDataset(Dataset):
         hidden_states_dir: Path,
         chunk_frames: int = 1500,
     ) -> None:
-        self.annotations = annotations
         self.hidden_states_dir = hidden_states_dir
         self.chunk_frames = chunk_frames
+
+        # Filter to annotations that have extracted hidden states
+        available = []
+        for ann in annotations:
+            ds_dir = hidden_states_dir / ann.dataset
+            if (ds_dir / f"{ann.stem}.hidden.npy").exists() or (ds_dir / f"{ann.stem}.npy").exists():
+                available.append(ann)
+        if len(available) < len(annotations):
+            skipped = len(annotations) - len(available)
+            print(f"  Filtered {skipped} tracks without hidden states ({len(available)} remaining)")
+        self.annotations = available
 
     def __len__(self) -> int:
         return len(self.annotations)

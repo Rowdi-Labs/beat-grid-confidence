@@ -174,12 +174,17 @@ def main() -> None:
     parser.add_argument("--output", type=Path, default=Path("outputs/evaluation.json"))
     parser.add_argument("--test-fold", type=int, default=1)
     parser.add_argument("--val-fold", type=int, default=0)
+    parser.add_argument("--all-tracks", action="store_true",
+                        help="Evaluate all tracks instead of test fold only")
     args = parser.parse_args()
 
     # Load annotations
     console.print("[bold]Loading annotations...[/bold]")
     all_annotations = load_all_annotations(args.annotations_dir, datasets=args.datasets)
-    _, _, test_anns = make_splits(all_annotations, val_fold=args.val_fold, test_fold=args.test_fold)
+    if args.all_tracks:
+        test_anns = all_annotations
+    else:
+        _, _, test_anns = make_splits(all_annotations, val_fold=args.val_fold, test_fold=args.test_fold)
 
     # Load confidence head if not baseline
     confidence_head = None

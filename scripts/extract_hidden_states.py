@@ -45,6 +45,7 @@ def extract_for_dataset(
     overlap = 64
 
     count = 0
+    skipped = 0
     with Progress() as progress:
         task = progress.add_task(f"  {dataset}", total=len(npy_files))
 
@@ -62,53 +63,71 @@ def extract_for_dataset(
             spec_tensor = torch.from_numpy(np.array(spec)).float()
             n_frames = spec_tensor.shape[0]
 
-            hidden_chunks = []
-            beat_chunks = []
-            downbeat_chunks = []
+            if chunk_frames <= 0:
+                # Full forward pass — no chunking, best quality
+                try:
+                    with torch.no_grad():
+                        inp = spec_tensor.unsqueeze(0).to(device)
+                        h = backbone.frontend(inp)
+                        h = backbone.transformer_blocks(h)
+                        logits = backbone.task_heads(h)
+                    hidden = h.squeeze(0).cpu().numpy()
+                    beat_logits = logits["beat"].squeeze(0).cpu().numpy()
+                    downbeat_logits = logits["downbeat"].squeeze(0).cpu().numpy()
+                except RuntimeError as e:
+                    if "buffer size" in str(e).lower() or "out of memory" in str(e).lower():
+                        console.print(f"  [yellow]OOM {stem} ({n_frames} frames), skipping[/yellow]")
+                        skipped += 1
+                        progress.advance(task)
+                        continue
+                    raise
+            else:
+                # Chunked processing with overlap blending
+                hidden_chunks = []
+                beat_chunks = []
+                downbeat_chunks = []
 
-            start = 0
-            while start < n_frames:
-                end = min(start + chunk_frames, n_frames)
-                chunk = spec_tensor[start:end].unsqueeze(0).to(device)
+                start = 0
+                while start < n_frames:
+                    end = min(start + chunk_frames, n_frames)
+                    chunk = spec_tensor[start:end].unsqueeze(0).to(device)
 
-                with torch.no_grad():
-                    h = backbone.frontend(chunk)
-                    h = backbone.transformer_blocks(h)
-                    logits = backbone.task_heads(h)
+                    with torch.no_grad():
+                        h = backbone.frontend(chunk)
+                        h = backbone.transformer_blocks(h)
+                        logits_out = backbone.task_heads(h)
 
-                h_np = h.squeeze(0).cpu().numpy()
-                b_np = logits["beat"].squeeze(0).cpu().numpy()
-                d_np = logits["downbeat"].squeeze(0).cpu().numpy()
+                    h_np = h.squeeze(0).cpu().numpy()
+                    b_np = logits_out["beat"].squeeze(0).cpu().numpy()
+                    d_np = logits_out["downbeat"].squeeze(0).cpu().numpy()
 
-                if hidden_chunks and overlap > 0 and start > 0:
-                    blend_len = min(overlap, h_np.shape[0], hidden_chunks[-1].shape[0])
-                    if blend_len > 0:
-                        w1d = np.linspace(0, 1, blend_len)
-                        w2d = w1d.reshape(-1, 1)
-                        # Blend hidden states
-                        hidden_chunks[-1][-blend_len:] = (
-                            (1 - w2d) * hidden_chunks[-1][-blend_len:] + w2d * h_np[:blend_len]
-                        )
-                        # Blend logits
-                        beat_chunks[-1][-blend_len:] = (
-                            (1 - w1d) * beat_chunks[-1][-blend_len:] + w1d * b_np[:blend_len]
-                        )
-                        downbeat_chunks[-1][-blend_len:] = (
-                            (1 - w1d) * downbeat_chunks[-1][-blend_len:] + w1d * d_np[:blend_len]
-                        )
-                        h_np = h_np[blend_len:]
-                        b_np = b_np[blend_len:]
-                        d_np = d_np[blend_len:]
+                    if hidden_chunks and overlap > 0 and start > 0:
+                        blend_len = min(overlap, h_np.shape[0], hidden_chunks[-1].shape[0])
+                        if blend_len > 0:
+                            w1d = np.linspace(0, 1, blend_len)
+                            w2d = w1d.reshape(-1, 1)
+                            hidden_chunks[-1][-blend_len:] = (
+                                (1 - w2d) * hidden_chunks[-1][-blend_len:] + w2d * h_np[:blend_len]
+                            )
+                            beat_chunks[-1][-blend_len:] = (
+                                (1 - w1d) * beat_chunks[-1][-blend_len:] + w1d * b_np[:blend_len]
+                            )
+                            downbeat_chunks[-1][-blend_len:] = (
+                                (1 - w1d) * downbeat_chunks[-1][-blend_len:] + w1d * d_np[:blend_len]
+                            )
+                            h_np = h_np[blend_len:]
+                            b_np = b_np[blend_len:]
+                            d_np = d_np[blend_len:]
 
-                hidden_chunks.append(h_np)
-                beat_chunks.append(b_np)
-                downbeat_chunks.append(d_np)
+                    hidden_chunks.append(h_np)
+                    beat_chunks.append(b_np)
+                    downbeat_chunks.append(d_np)
 
-                start = end - overlap if end < n_frames else end
+                    start = end - overlap if end < n_frames else end
 
-            hidden = np.concatenate(hidden_chunks, axis=0)
-            beat_logits = np.concatenate(beat_chunks)
-            downbeat_logits = np.concatenate(downbeat_chunks)
+                hidden = np.concatenate(hidden_chunks, axis=0)
+                beat_logits = np.concatenate(beat_chunks)
+                downbeat_logits = np.concatenate(downbeat_chunks)
 
             np.save(hidden_path, hidden.astype(np.float16))
             np.savez_compressed(logits_path,
@@ -117,6 +136,9 @@ def extract_for_dataset(
 
             progress.advance(task)
             count += 1
+
+    if skipped:
+        console.print(f"  [yellow]Skipped {skipped} tracks (OOM)[/yellow]")
 
     return count
 
@@ -128,7 +150,8 @@ def main() -> None:
     parser.add_argument("--datasets", type=str, nargs="+", required=True)
     parser.add_argument("--device", type=str, default="cpu")
     parser.add_argument("--checkpoint", type=str, default="final0")
-    parser.add_argument("--chunk-frames", type=int, default=512)
+    parser.add_argument("--chunk-frames", type=int, default=0,
+                        help="Frames per chunk. 0 = full track (no chunking, best quality)")
     parser.add_argument("--force", action="store_true", help="Re-extract even if files exist")
     args = parser.parse_args()
 
