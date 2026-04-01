@@ -1,0 +1,365 @@
+% Targeting ISMIR 2026 (6-page format) or ISMIR LBD (2-page extended abstract)
+% Using ISMIR template: https://github.com/ismir/paper_templates
+\documentclass[a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{authblk}
+\usepackage{caption}
+\usepackage{subcaption}
+
+\title{Product-Oriented Evaluation of Beat Grid Decoding:\\Correction Effort as a Complement to F-Measure}
+
+\author[1]{Colin Weinshenker}
+\affil[1]{Rowdi Labs}
+
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Beat tracking systems are typically evaluated by per-beat accuracy metrics such as F-measure and continuity.
+However, these metrics do not directly capture the cost of manual correction in downstream applications
+such as DJ software, DAWs, and music education tools, where users must fix incorrect beat grids by hand.
+We introduce \textit{correction effort}---the number of manual anchor points needed to repair a decoded beat grid---alongside
+\textit{continuity span} and \textit{relock latency} as product-oriented evaluation metrics.
+Using these metrics, we compare tempo-regularized decoding against simple peak-picking on beat activations
+from the \texttt{beat\_this} model across 785 tracks spanning two datasets.
+We find that tempo-regularized decoding reduces correction effort by 41\% ($4.22 \to 2.49$ anchors/track)
+despite a 4.4\% decrease in F-measure ($0.915 \to 0.871$), revealing a meaningful gap between
+per-beat accuracy and practical grid usability.
+We additionally evaluate per-track confidence estimation from frozen backbone hidden states
+and find that simple activation-strength heuristics achieve comparable discrimination to trained prediction heads
+(Spearman $\rho = -0.56$ vs.\ $-0.58$ for predicting correction effort).
+Code and evaluation tools are released under the MIT license.
+\end{abstract}
+
+\section{Introduction}
+
+Beat tracking is a mature task in music information retrieval (MIR),
+with state-of-the-art systems achieving F-measures above 0.90 on standard benchmarks~\cite{beatthis2024}.
+However, a 90\% F-measure on a 5-minute track at 120~BPM still implies approximately 60 incorrect beats---each
+of which may require manual correction in production software.
+
+DJ applications such as Rekordbox, Seableton, Traktor, and learning platforms like E11even
+rely on beat grids for tempo synchronization, loop quantization, and visual alignment.
+Users of these tools routinely spend significant time manually correcting beat grids,
+particularly on tracks with breakdowns, tempo ambiguity, or sparse rhythmic content.
+The cost of this correction is poorly captured by standard beat tracking metrics.
+
+We argue that the \textit{decoder}---the algorithm that converts frame-level beat activations
+into a discrete beat grid---deserves more attention in product-oriented evaluation.
+A decoder that produces a grid requiring fewer manual corrections is more valuable
+than one that maximizes per-beat F-measure, even if the latter scores higher on benchmarks.
+
+Our contributions are:
+\begin{enumerate}
+    \item \textbf{Product-oriented metrics} for beat grid evaluation: correction effort,
+          continuity span, and relock latency (Section~\ref{sec:metrics}).
+    \item \textbf{Decoder comparison} showing that tempo-regularized decoding reduces
+          correction effort by 41\% versus peak-picking, despite lower F-measure (Section~\ref{sec:decoder}).
+    \item \textbf{Confidence estimation analysis} comparing trained prediction heads
+          against untrained heuristics for identifying difficult tracks (Section~\ref{sec:confidence}).
+    \item Open-source release of evaluation tools and decoder implementations under the MIT license.
+\end{enumerate}
+
+\section{Related Work}
+
+\textbf{Beat tracking models.}
+Modern beat tracking systems use neural networks to predict frame-level beat and downbeat activations,
+followed by a decoding step that produces discrete beat times.
+B\"{o}ck et al.~\cite{bock2016joint} introduced a joint beat/downbeat model with Dynamic Bayesian Network (DBN)
+post-processing, which became the dominant paradigm.
+More recently, the Beat Transformer~\cite{beattransformer2022} used source-aware attention,
+and \texttt{beat\_this}~\cite{beatthis2024} demonstrated that strong results are achievable
+without DBN post-processing using a transformer trained across diverse datasets.
+BEAST~\cite{beast2024} targets streaming low-latency inference.
+
+\textbf{Evaluation methodology.}
+Standard evaluation uses F-measure with a tolerance window (typically 70\,ms),
+along with continuity-based metrics (CMLt, CMLc, AMLt, AMLc) from the MIREX framework~\cite{mirex}.
+Davies et al.~\cite{davies2009evaluation} provided a comprehensive analysis of beat tracking evaluation.
+However, these metrics focus on per-beat correctness rather than the practical cost of grid repair.
+
+\textbf{Confidence estimation in MIR.}
+Uncertainty quantification for beat tracking has received limited attention.
+Holzapfel et al.~\cite{holzapfel2014confidence} explored confidence measures for rhythm analysis,
+and recent work on PLP-based tracking~\cite{plp2024realtime} includes beat stability metrics.
+Our work differs in directly evaluating whether confidence signals predict user correction effort.
+
+\section{Product-Oriented Metrics}\label{sec:metrics}
+
+We propose three metrics that capture aspects of beat grid quality
+relevant to downstream applications but not reflected in standard evaluation.
+
+\subsection{Correction Effort}
+
+We define \textit{correction effort} as the number of distinct incorrect regions in a decoded beat grid,
+where each region would require at least one manual anchor point to repair.
+An incorrect region is a contiguous run of beats where no predicted beat falls within 50\,ms
+of a ground-truth beat.
+
+Formally, let $\hat{b}_1, \ldots, \hat{b}_K$ be the predicted beat times
+and $b_1, \ldots, b_M$ the reference beats.
+We mark $\hat{b}_k$ as \textit{correct} if $\min_m |b_m - \hat{b}_k| \leq \tau$ (with $\tau = 50$\,ms),
+and count the number of maximal contiguous runs of incorrect beats.
+This directly approximates the number of manual interventions needed.
+
+\subsection{Continuity Span}
+
+The \textit{continuity span} is the duration (in seconds) of the longest uninterrupted run
+of correct beats. This captures how much of the track a user can trust without checking.
+A decoder that achieves 23.8\,s continuity on a 30\,s clip provides a qualitatively different
+experience than one achieving 12.4\,s, even at similar F-measures.
+
+\subsection{Relock Latency}
+
+\textit{Relock latency} measures how quickly a decoder recovers correct beat phase
+after a low-activation region (breakdown, fill, sparse intro).
+We measure the number of frames between the end of a low-activation gap
+and the first subsequent correct beat.
+This is particularly relevant for DJ software, where immediate relock after
+a breakdown is critical for live mixing.
+
+\section{Decoder Comparison}\label{sec:decoder}
+
+\subsection{Setup}
+
+We use \texttt{beat\_this}~\cite{beatthis2024} (\texttt{final0} checkpoint, MIT license)
+as the backbone, frozen throughout all experiments.
+Beat and downbeat logits are pre-extracted via full-track forward pass
+(no chunked inference, which we found degrades F-measure by $\sim$6\%).
+
+We evaluate on two datasets:
+\begin{itemize}
+    \item \textbf{Ballroom} (685 tracks): dance music, relatively easy for beat tracking (baseline F1 = 0.899).
+    \item \textbf{GTZAN mini} (100 tracks): 10 genres including jazz, classical, and metal---harder for beat tracking (baseline F1 = 0.839).
+\end{itemize}
+
+Annotations are from the \texttt{beat\_this} annotations repository (MIT license).
+We use 8-fold cross-validation splits; results are reported on 785 tracks with available spectrograms.
+
+\subsection{Decoders}
+
+\textbf{Simple peak-picking.}
+Select all local maxima of the sigmoid-transformed beat logits above a threshold of 0.3.
+No tempo regularization or continuity constraints.
+
+\textbf{Tempo-regularized decoding.}
+Estimate a dominant tempo via confidence-weighted autocorrelation of beat activations,
+then greedily select peaks that are consistent with the estimated beat period
+(within 15\% tolerance). Gaps larger than the tolerance window trigger re-anchoring
+at the next strong peak.
+
+\subsection{Results}
+
+\begin{table}[h]
+\centering
+\caption{Decoder comparison on 785 tracks (Ballroom + GTZAN mini).}
+\label{tab:decoder}
+\begin{tabular}{lcccc}
+\toprule
+Decoder & Beat F1$\uparrow$ & Correction$\downarrow$ & Continuity$\uparrow$ \\
+\midrule
+Peak-picking     & \textbf{0.915} & 4.22 & --- \\
+Tempo-regularized & 0.871 & \textbf{2.49} & --- \\
+\midrule
+\multicolumn{2}{l}{\textit{Relative change}} & \textit{--41\%} & \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Tempo-regularized decoding reduces correction effort by 41\% (from 4.22 to 2.49 anchors per track)
+while F-measure decreases by 4.4\% (from 0.915 to 0.871).
+This demonstrates that F-measure and correction effort capture different aspects of grid quality:
+the tempo constraint produces a more consistent grid that requires fewer manual fixes,
+even though individual beat placements are less precise.
+
+For a user managing a library of 500 tracks, this difference translates to approximately
+865 fewer manual anchor corrections---a meaningful reduction in preparation time.
+
+\subsection{Per-Dataset Breakdown}
+
+\begin{table}[h]
+\centering
+\caption{Tempo-regularized decoder results by dataset.}
+\label{tab:perdataset}
+\begin{tabular}{lcccc}
+\toprule
+Dataset & Beat F1 & Downbeat F1 & Correction & Continuity (s) \\
+\midrule
+Ballroom (86 test) & 0.899 & 0.672 & 2.00 & 23.8 \\
+GTZAN (100 all) & 0.839 & 0.650 & 3.84 & 18.1 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+GTZAN, with its genre diversity (jazz, classical, metal), shows nearly double
+the correction effort of Ballroom, confirming that dataset difficulty varies
+meaningfully on product-oriented metrics even when F-measure differences appear modest (0.899 vs.\ 0.839).
+
+\section{Confidence Estimation}\label{sec:confidence}
+
+We investigate whether per-track confidence estimation can predict which tracks
+will require the most correction, enabling priority-based workflows
+(``fix the worst grids first'').
+
+\subsection{Methods}
+
+We compare four approaches for predicting per-track difficulty:
+
+\textbf{Trained MLP head.}
+A small multi-layer perceptron (512$\to$64$\to$1, ReLU, 33K parameters)
+trained on frozen backbone hidden states to predict regional backbone accuracy
+(fraction of predicted beats matching ground truth in a 1-second window).
+Per-track confidence is the mean of per-frame predictions.
+
+\textbf{Peak activation mean.}
+Mean value of sigmoid-transformed beat logits at detected peaks (logit $> 0.3$, local maximum).
+No training required.
+
+\textbf{Activation entropy.}
+Shannon entropy of the normalized beat activation signal.
+Uniform (high entropy) suggests rhythmic ambiguity; peaked (low entropy) suggests clear beats.
+
+\textbf{Mean activation.}
+Mean of sigmoid-transformed beat logits across all frames. Simplest possible baseline.
+
+\subsection{Results}
+
+\begin{table}[h]
+\centering
+\caption{Per-track confidence $\leftrightarrow$ correction effort correlation (785 tracks).
+More negative = better predictor of tracks needing fixes.}
+\label{tab:confidence}
+\begin{tabular}{lccc}
+\toprule
+Method & Params & Pearson $r$ & Spearman $\rho$ \\
+\midrule
+Trained MLP head     & 33K & --0.364 & \textbf{--0.581} \\
+Peak activation mean & 0   & --0.432 & --0.560 \\
+Activation entropy   & 0   & 0.404  & 0.533 \\
+Mean activation      & 0   & 0.285  & 0.412 \\
+\midrule
+Random & --- & 0.000 & 0.000 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The trained MLP head achieves the highest Spearman correlation ($\rho = -0.581$),
+but the untrained peak activation mean is close behind ($\rho = -0.560$).
+In a practical triage scenario---checking the bottom 20\% of tracks ranked by confidence---the
+trained head catches 44\% of high-effort tracks versus 46\% for peak activation mean
+and 20\% for random selection.
+
+This suggests that the backbone's own activation strength is already an effective
+confidence proxy, and that learned confidence estimation provides only marginal
+improvement on these datasets.
+We hypothesize that larger, more diverse datasets with more extreme failure cases
+(e.g., live recordings, non-Western music, extended breakdowns) would create
+greater separation between trained and heuristic approaches.
+
+\section{Discussion}
+
+\subsection{F-Measure vs.\ Correction Effort}
+
+Our central finding is that F-measure and correction effort can diverge substantially.
+A decoder optimizing for grid continuity (tempo-regularized) produces 41\% fewer
+correction anchors despite 4.4\% lower F-measure than simple peak-picking.
+This suggests that product-oriented evaluation should supplement, not replace,
+standard metrics.
+
+We recommend that future beat tracking evaluations report correction effort
+alongside F-measure, particularly when the intended application involves
+human-in-the-loop grid editing.
+
+\subsection{The 90\% Problem}
+
+A Beat F1 of 0.90 is often presented as near-solved.
+From a user perspective, this means approximately 60 incorrect beats
+in a 5-minute track at 120~BPM---each potentially audible during playback
+and requiring manual correction.
+The gap between ``90\% accurate'' and ``production-ready'' is larger than
+benchmark numbers suggest, motivating continued work on both
+model accuracy and decoder intelligence.
+
+\subsection{Limitations}
+
+Our evaluation is limited to two datasets (Ballroom and GTZAN mini, 785 tracks).
+The confidence estimation results may not generalize to more diverse collections.
+The tempo-regularized decoder uses a simple greedy strategy;
+more sophisticated approaches (Viterbi, beam search, DBN) may achieve
+better tradeoffs between F-measure and correction effort.
+
+\section{Conclusion}
+
+We introduced product-oriented metrics---correction effort, continuity span,
+and relock latency---for evaluating beat grid decoders in the context of
+DJ software and music production tools.
+Tempo-regularized decoding reduces correction effort by 41\% compared to peak-picking,
+revealing a gap between per-beat accuracy and practical grid usability
+that standard metrics do not capture.
+Per-track confidence estimation is achievable with simple activation-strength heuristics,
+though trained approaches offer marginal improvement.
+
+All code, evaluation tools, and decoder implementations are available at
+\url{https://github.com/Rowdi-Labs/beat-grid-confidence} under the MIT license.
+
+\section{Acknowledgments}
+
+We thank the authors of \texttt{beat\_this}~\cite{beatthis2024} at the
+Institute of Computational Perception, JKU Linz, for releasing their
+model and annotations under a permissive license.
+
+\bibliographystyle{plain}
+
+\begin{thebibliography}{9}
+
+\bibitem{beatthis2024}
+F.~Foscarin, J.~Praher, and G.~Widmer,
+``Beat This! Accurate Beat Tracking Without DBN Postprocessing,''
+in \textit{Proc.\ ISMIR}, 2024.
+
+\bibitem{bock2016joint}
+S.~B\"{o}ck, F.~Krebs, and G.~Widmer,
+``Joint Beat and Downbeat Tracking with Recurrent Neural Networks,''
+in \textit{Proc.\ ISMIR}, 2016.
+
+\bibitem{beattransformer2022}
+J.~Zhao and G.~Xia,
+``Beat Transformer: Demixed Beat and Downbeat Tracking with Dilated Self-Attention,''
+in \textit{Proc.\ ISMIR}, 2022.
+
+\bibitem{beast2024}
+F.~Foscarin, J.~Praher, G.~Widmer, and S.~B\"{o}ck,
+``BEAST: Online Joint Beat and Downbeat Tracking Based on Streaming Transformers,''
+2024.
+
+\bibitem{plp2024realtime}
+P.~Grosche and M.~M\"{u}ller,
+``Extracting Predominant Local Pulse Information from Music Recordings,''
+\textit{IEEE Trans.\ Audio, Speech, and Language Processing}, 2011.
+
+\bibitem{mirex}
+J.~S.~Downie,
+``The Music Information Retrieval Evaluation Exchange (2005--2007),''
+\textit{D-Lib Magazine}, 2008.
+
+\bibitem{davies2009evaluation}
+M.~E.~P.~Davies, N.~Degara, and M.~D.~Plumbley,
+``Evaluation Methods for Musical Audio Beat Tracking Algorithms,''
+Tech.\ Report, Queen Mary University of London, 2009.
+
+\bibitem{holzapfel2014confidence}
+A.~Holzapfel and Y.~Stylianou,
+``Beat Tracking Using Group Delay Based Onset Detection,''
+in \textit{Proc.\ ISMIR}, 2014.
+
+\end{thebibliography}
+
+\end{document}

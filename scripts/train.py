@@ -45,7 +45,9 @@ class ConfidenceHeadTask(pl.LightningModule):
         self.config = config
 
         hidden_dim = config["model"]["hidden_dim"]
-        self.confidence_head = ConfidenceHead(hidden_dim)
+        bottleneck = config["model"].get("confidence_bottleneck", 0)
+        dropout = config["model"].get("confidence_dropout", 0.1)
+        self.confidence_head = ConfidenceHead(hidden_dim, bottleneck=bottleneck, dropout=dropout)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         return self.confidence_head(hidden_states)

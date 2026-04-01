@@ -197,8 +197,18 @@ def main() -> None:
             for k, v in state_dict.items()
             if k.startswith("confidence_head.")
         }
-        hidden_dim = head_state["projection.weight"].shape[1]
-        confidence_head = ConfidenceHead(hidden_dim)
+        # Detect architecture from state dict keys
+        if "projection.weight" in head_state:
+            # Linear mode
+            hidden_dim = head_state["projection.weight"].shape[1]
+            confidence_head = ConfidenceHead(hidden_dim, bottleneck=0)
+        elif "net.0.weight" in head_state:
+            # MLP mode: net.0 = Linear(hidden_dim, bottleneck), net.3 = Linear(bottleneck, 1)
+            hidden_dim = head_state["net.0.weight"].shape[1]
+            bottleneck = head_state["net.0.weight"].shape[0]
+            confidence_head = ConfidenceHead(hidden_dim, bottleneck=bottleneck)
+        else:
+            raise ValueError(f"Unknown head state dict keys: {list(head_state.keys())}")
         confidence_head.load_state_dict(head_state)
         confidence_head.eval()
         console.print(f"  Loaded {sum(p.numel() for p in confidence_head.parameters())} params (dim={hidden_dim})")

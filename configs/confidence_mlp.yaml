@@ -1,0 +1,65 @@
+# V4 configuration: MLP confidence head
+# 512 → 64 → 1 with ReLU + dropout, ~33K params
+# Hypothesis: nonlinear head can learn decision boundaries that
+# the linear head (v1-v3) collapsed on
+
+model:
+  backbone: "beat_this_small"
+  checkpoint: null
+  hidden_dim: 512
+  freeze_backbone: true
+  confidence_bottleneck: 64  # 0 = linear, 64 = MLP with hidden layer
+  confidence_dropout: 0.1
+  heads:
+    confidence: true
+    tempo_distribution: false
+  tempo_bins: 141
+  bpm_min: 60.0
+  bpm_max: 200.0
+
+data:
+  sample_rate: 22050
+  hop_length: 441
+  n_mels: 128
+  chunk_frames: 2048
+  overlap_frames: 256
+  augment: true
+  beat_tolerance_sec: 0.050
+  spectrogram_dir: "data/spectrograms"
+  annotations_dir: "data/annotations"
+  splits_dir: "data/splits"
+
+training:
+  batch_size: 32
+  learning_rate: 1.0e-3  # lower than v1-v3 (3e-3) — more params need gentler LR
+  weight_decay: 1.0e-4
+  max_epochs: 50  # more epochs — MLP needs longer to converge
+  early_stopping_patience: 10
+  optimizer: "adamw"
+  scheduler: "cosine"
+  warmup_epochs: 1
+  gradient_clip_val: 1.0
+
+loss:
+  lambda_confidence: 1.0
+  lambda_tempo: 0.0
+  confidence_pos_weight: 1.0
+  tempo_sigma_bpm: 2.0
+
+evaluation:
+  confidence_threshold: 0.5
+  beat_tolerance_sec: 0.050
+  relock_min_gap_sec: 0.5
+
+hardware:
+  accelerator: "auto"
+  devices: 1
+  precision: "32"
+
+logging:
+  project: "beat-grid-confidence"
+  entity: null
+  log_every_n_steps: 10
+  save_top_k: 3
+  monitor: "val/confidence_brier"
+  mode: "min"

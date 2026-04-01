@@ -9,16 +9,34 @@ import torch.nn as nn
 class ConfidenceHead(nn.Module):
     """Per-frame confidence prediction.
 
-    Single linear projection from hidden dim to scalar, sigmoid output.
     Predicts whether the backbone's beat prediction at each frame is reliable.
+    Trained against regional backbone accuracy: in a 1-second window, what
+    fraction of the backbone's predicted beats match ground truth?
 
-    Trained against a binary correctness mask: 1 if the nearest ground-truth
-    beat is within 50ms of the predicted beat, 0 otherwise.
+    Supports two modes:
+    - Linear: single projection (512→1). Fast but collapses to near-constant.
+    - MLP: hidden layer with ReLU (512→bottleneck→1). Can learn nonlinear
+      decision boundaries in hidden-state space.
     """
 
-    def __init__(self, hidden_dim: int = 512) -> None:
+    def __init__(self, hidden_dim: int = 512, bottleneck: int = 0, dropout: float = 0.1) -> None:
+        """
+        Args:
+            hidden_dim: Input dimension from backbone hidden states
+            bottleneck: Hidden layer size. 0 = linear mode (no hidden layer).
+                        64 recommended for MLP mode (~33K params).
+            dropout: Dropout rate between layers (MLP mode only)
+        """
         super().__init__()
-        self.projection = nn.Linear(hidden_dim, 1)
+        if bottleneck > 0:
+            self.net = nn.Sequential(
+                nn.Linear(hidden_dim, bottleneck),
+                nn.ReLU(),
+                nn.Dropout(dropout),
+                nn.Linear(bottleneck, 1),
+            )
+        else:
+            self.net = nn.Linear(hidden_dim, 1)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """
@@ -28,7 +46,7 @@ class ConfidenceHead(nn.Module):
         Returns:
             [B, T] confidence scores in [0, 1]
         """
-        return torch.sigmoid(self.projection(hidden_states)).squeeze(-1)
+        return torch.sigmoid(self.net(hidden_states)).squeeze(-1)
 
 
 class TempoDistributionHead(nn.Module):
